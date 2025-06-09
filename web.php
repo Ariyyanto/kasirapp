@@ -18,7 +18,7 @@ Route::get('/admin/logout', [AuthController::class, 'logout'])->name('logout');
 
 Route::middleware(['auth.admin'])->group(function () {
     Route::get('/admin/dashboard', [AdminController::class, 'dashboard'])->name('dashboard');
-    Route::resource('/admin/produk', AdminController::class);
+    Route::resource('/admin/produk', AdminController::class)->except(['create', 'edit']);
     Route::get('/admin/historis', [AdminController::class, 'historis'])->name('historis');
     Route::get('/admin/prediksi', [AdminController::class, 'prediksi'])->name('prediksi');
     Route::post('/admin/prediksi', [AdminController::class, 'generate'])->name('prediksi.generate');

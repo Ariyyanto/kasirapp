@@ -130,37 +130,68 @@ class AdminController extends Controller
     }
 
     public function store(Request $request)
-    {
-        $request->validate([
-            'nama_produk' => 'required',
-            'harga' => 'required|numeric',
-            'jumlah_stok' => 'required|integer',
-            'barcode' => 'nullable|unique:produk,barcode'
-        ]);
+{
+    $validated = $request->validate([
+        'nama_produk' => 'required|string|max:255',
+        'harga' => 'required|numeric|min:0',
+        'jumlah_stok' => 'required|integer|min:0',
+        'barcode' => 'nullable|string|max:100|unique:produk,barcode',
+        'deskripsi' => 'nullable|string'
+    ]);
 
-        Produk::create($request->all());
-        return redirect()->route('produk.index')->with('success', 'Produk berhasil ditambahkan');
+    try {
+        $produk = Produk::create($validated);
+        return response()->json([
+            'success' => true,
+            'message' => 'Produk berhasil ditambahkan',
+            'data' => $produk
+        ], 201);
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Gagal menyimpan produk',
+            'error' => $e->getMessage()
+        ], 500);
     }
+}
 
-    public function update(Request $request, $id)
-    {
-        $request->validate([
-            'nama_produk' => 'required',
-            'harga' => 'required|numeric',
-            'jumlah_stok' => 'required|integer',
-            'barcode' => 'nullable|unique:produk,barcode,'.$id
-        ]);
+public function update(Request $request, $id)
+{
+    $validated = $request->validate([
+        'nama_produk' => 'required|string|max:255',
+        'harga' => 'required|numeric|min:0',
+        'jumlah_stok' => 'required|integer|min:0',
+        'barcode' => 'nullable|string|max:100|unique:produk,barcode,'.$id,
+        'deskripsi' => 'nullable|string'
+    ]);
 
+    try {
         $produk = Produk::findOrFail($id);
-        $produk->update($request->all());
-        return redirect()->route('produk.index')->with('success', 'Produk berhasil diperbarui');
+        $produk->update($validated);
+        
+        return response()->json([
+            'success' => true,
+            'message' => 'Produk berhasil diperbarui',
+            'data' => $produk
+        ]);
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Gagal memperbarui produk',
+            'error' => $e->getMessage()
+        ], 500);
     }
+}
 
     public function destroy($id)
     {
         $produk = Produk::findOrFail($id);
         $produk->delete();
-        return redirect()->route('produk.index')->with('success', 'Produk berhasil dihapus');
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Produk berhasil dihapus'
+        ]);
     }
 
     public function historis()
@@ -168,15 +199,23 @@ class AdminController extends Controller
         $historis = Historis::with('produk')->orderBy('tanggal_penjualan', 'desc')->get();
         return view('admin.historis.index', compact('historis'));
     }
-
     public function prediksi()
     {
         $prediksi = null;
         $produkTerpilih = null;
         $detailPerhitungan = [];
+        $perbandinganMetode = [];
+        $rekomendasiMetode = null;
 
         $produk = Produk::all();
-        return view('admin.prediksi.index', compact('prediksi', 'produkTerpilih', 'detailPerhitungan', 'produk'));
+        return view('admin.prediksi.index', compact(
+            'prediksi',
+            'produkTerpilih',
+            'detailPerhitungan',
+            'perbandinganMetode',
+            'rekomendasiMetode',
+            'produk'
+        ));
     }
 
     public function generate(Request $request)
@@ -187,84 +226,230 @@ class AdminController extends Controller
             'tahun' => 'required|integer|min:2000'
         ]);
 
-        // Logika prediksi sama seperti sebelumnya
-        $prediksi = $this->hitungPrediksi($request->id_produk, $request->bulan, $request->tahun);
+        $id_produk = $request->id_produk;
+        $bulan = $request->bulan;
+        $tahun = $request->tahun;
+
+        // Get historical data
+        $historis = $this->getHistoricalData($id_produk, $tahun, $bulan);
         
-        $produkTerpilih = Produk::find($request->id_produk);
-        $detailPerhitungan = $this->getDetailPerhitungan($request->id_produk, $request->bulan, $request->tahun);
+        if ($historis->count() < 6) {
+            return redirect()->back()->with('error', 'Data historis kurang dari 6 bulan. Tidak dapat melakukan prediksi.');
+        }
+
+        // Calculate predictions
+        $smaResults = $this->calculateSMA($historis);
+        $wmaResults = $this->calculateWMA($historis);
+        
+        // Compare methods and recommend best one
+        $rekomendasiMetode = $this->compareMethods($smaResults, $wmaResults);
+        
+        // Prepare data for view
+        $produkTerpilih = Produk::find($id_produk);
+        $detailPerhitungan = $this->prepareCalculationDetails($historis, $smaResults, $wmaResults);
+        $perbandinganMetode = $this->prepareMethodComparison($smaResults, $wmaResults);
         
         return view('admin.prediksi.index', [
             'produk' => Produk::all(),
-            'prediksi' => $prediksi,
+            'prediksi' => (object)[
+                'sma' => $smaResults['prediction'],
+                'wma' => $wmaResults['prediction'],
+                'rekomendasi' => $rekomendasiMetode
+            ],
             'produkTerpilih' => $produkTerpilih,
-            'detailPerhitungan' => $detailPerhitungan
+            'detailPerhitungan' => $detailPerhitungan,
+            'perbandinganMetode' => $perbandinganMetode,
+            'rekomendasiMetode' => $rekomendasiMetode
         ]);
     }
 
-        private function hitungPrediksi($id_produk, $bulan, $tahun)
+    private function getHistoricalData($id_produk, $tahun, $bulan)
     {
-        // Ambil 6 bulan terakhir dari produk terkait
-        $historis = Historis::where('id_produk', $id_produk)
-            ->whereYear('tanggal_penjualan', '<=', $tahun)
-            ->orderBy('tanggal_penjualan', 'desc')
-            ->limit(6)
-            ->get()
-            ->sortBy('tanggal_penjualan')
-            ->values();
+        $targetDate = Carbon::create($tahun, $bulan, 1);
+        $startDate = $targetDate->copy()->subMonths(12);
+        
+        return Historis::where('id_produk', $id_produk)
+            ->whereBetween('tanggal_penjualan', [$startDate, $targetDate->subMonth()])
+            ->select(
+                DB::raw('YEAR(tanggal_penjualan) as tahun'),
+                DB::raw('MONTH(tanggal_penjualan) as bulan'),
+                DB::raw('SUM(jumlah_jual) as jumlah_jual')
+            )
+            ->groupBy('tahun', 'bulan')
+            ->orderBy('tahun', 'asc')
+            ->orderBy('bulan', 'asc')
+            ->get();
+    }
 
-        if ($historis->count() < 3) {
-            return null; // Tidak cukup data untuk prediksi
+    private function calculateSMA($historis)
+    {
+        $data = $historis->pluck('jumlah_jual')->toArray();
+        $windowSize = min(6, count($data)); // Use 6-month window or available data
+        
+        $predictions = [];
+        $errors = [];
+        $absoluteErrors = [];
+        $squaredErrors = [];
+        
+        // Calculate SMA for each possible window
+        for ($i = $windowSize; $i < count($data); $i++) {
+            $window = array_slice($data, $i - $windowSize, $windowSize);
+            $sma = array_sum($window) / $windowSize;
+            $actual = $data[$i];
+            $error = $actual - $sma;
+            
+            $predictions[] = $sma;
+            $errors[] = $error;
+            $absoluteErrors[] = abs($error);
+            $squaredErrors[] = pow($error, 2);
         }
-
-        $sma = $historis->pluck('jumlah_jual')->avg();
-
-        // Hitung WMA dengan bobot dari 1 ke 6
-        $weights = [1, 2, 3, 4, 5, 6];
-        $jumlah = $historis->pluck('jumlah_jual')->values();
-        $totalWeight = array_sum($weights);
-
-        $wma = 0;
-        for ($i = 0; $i < count($jumlah); $i++) {
-            $wma += $jumlah[$i] * $weights[$i];
-        }
-        $wma /= $totalWeight;
-
-        return (object)[
-            'jumlah_prediksi' => round($sma),
-            'jumlah_prediksi_wma' => round($wma),
-            'mape' => 5.6, // Dummy MAPE
-            'mse' => 34.2,  // Dummy MSE
-            'mape_wma' => 4.8,
-            'mse_wma' => 30.1
+        
+        // Final prediction (average of last window)
+        $finalPrediction = array_sum(array_slice($data, -$windowSize)) / $windowSize;
+        
+        return [
+            'prediction' => round($finalPrediction),
+            'mape' => $this->calculateMAPE($data, $predictions),
+            'mse' => count($squaredErrors) > 0 ? array_sum($squaredErrors) / count($squaredErrors) : 0,
+            'mae' => count($absoluteErrors) > 0 ? array_sum($absoluteErrors) / count($absoluteErrors) : 0,
+            'window_size' => $windowSize,
+            'predictions' => $predictions,
+            'errors' => $errors
         ];
     }
 
-    private function getDetailPerhitungan($id_produk, $bulan, $tahun)
+    private function calculateWMA($historis)
     {
-        $historis = Historis::where('id_produk', $id_produk)
-            ->whereYear('tanggal_penjualan', '<=', $tahun)
-            ->orderBy('tanggal_penjualan', 'desc')
-            ->limit(6)
-            ->get()
-            ->sortBy('tanggal_penjualan')
-            ->values();
+        $data = $historis->pluck('jumlah_jual')->toArray();
+        $windowSize = min(6, count($data)); // Use 6-month window or available data
+        
+        $predictions = [];
+        $errors = [];
+        $absoluteErrors = [];
+        $squaredErrors = [];
+        
+        // Calculate WMA for each possible window
+        for ($i = $windowSize; $i < count($data); $i++) {
+            $window = array_slice($data, $i - $windowSize, $windowSize);
+            $weights = range(1, $windowSize);
+            $totalWeight = array_sum($weights);
+            
+            $wma = 0;
+            foreach ($window as $index => $value) {
+                $wma += $value * $weights[$index];
+            }
+            $wma /= $totalWeight;
+            
+            $actual = $data[$i];
+            $error = $actual - $wma;
+            
+            $predictions[] = $wma;
+            $errors[] = $error;
+            $absoluteErrors[] = abs($error);
+            $squaredErrors[] = pow($error, 2);
+        }
+        
+        // Final prediction (WMA of last window)
+        $finalWindow = array_slice($data, -$windowSize);
+        $weights = range(1, $windowSize);
+        $totalWeight = array_sum($weights);
+        
+        $finalPrediction = 0;
+        foreach ($finalWindow as $index => $value) {
+            $finalPrediction += $value * $weights[$index];
+        }
+        $finalPrediction /= $totalWeight;
+        
+        return [
+            'prediction' => round($finalPrediction),
+            'mape' => $this->calculateMAPE($data, $predictions),
+            'mse' => count($squaredErrors) > 0 ? array_sum($squaredErrors) / count($squaredErrors) : 0,
+            'mae' => count($absoluteErrors) > 0 ? array_sum($absoluteErrors) / count($absoluteErrors) : 0,
+            'window_size' => $windowSize,
+            'weights' => $weights,
+            'predictions' => $predictions,
+            'errors' => $errors
+        ];
+    }
 
-        $detail = [];
-        $jumlah = $historis->pluck('jumlah_jual')->values();
+    private function calculateMAPE($actuals, $predictions)
+    {
+        $sumPercentage = 0;
+        $count = min(count($actuals), count($predictions));
+        
+        for ($i = 0; $i < $count; $i++) {
+            if ($actuals[$i] != 0) { // Avoid division by zero
+                $sumPercentage += abs(($actuals[$i] - $predictions[$i]) / $actuals[$i]);
+            }
+        }
+        
+        return $count > 0 ? ($sumPercentage / $count) * 100 : 0;
+    }
 
-        // Dummy perhitungan
-        for ($i = 0; $i < $jumlah->count(); $i++) {
-            $detail[] = [
-                'bulan' => Carbon::parse($historis[$i]->tanggal_penjualan)->translatedFormat('F Y'),
-                'aktual' => $jumlah[$i],
-                'sma' => $jumlah->avg(),
-                'wma' => $jumlah[$i], // Ganti sesuai rumus asli
-                'error_sma' => abs($jumlah[$i] - $jumlah->avg()),
-                'error_wma' => abs($jumlah[$i] - $jumlah[$i]),
+    private function compareMethods($sma, $wma)
+    {
+        // Compare based on MAPE (lower is better)
+        if ($sma['mape'] < $wma['mape']) {
+            return [
+                'metode' => 'SMA',
+                'alasan' => 'Memiliki MAPE lebih rendah (' . number_format($sma['mape'], 2) . '% vs ' . number_format($wma['mape'], 2) . '%)',
+                'prediksi' => $sma['prediction']
+            ];
+        } else {
+            return [
+                'metode' => 'WMA',
+                'alasan' => 'Memiliki MAPE lebih rendah (' . number_format($wma['mape'], 2) . '% vs ' . number_format($sma['mape'], 2) . '%)',
+                'prediksi' => $wma['prediction']
             ];
         }
-
-        return $detail;
     }
+
+    private function prepareCalculationDetails($historis, $sma, $wma)
+    {
+        $details = [];
+        $data = $historis->pluck('jumlah_jual')->toArray();
+        $windowSize = $sma['window_size'];
+        
+        for ($i = $windowSize; $i < count($data); $i++) {
+            $date = $historis[$i];
+            $bulan = Carbon::create($date->tahun, $date->bulan, 1)->translatedFormat('F Y');
+            
+            $smaIndex = $i - $windowSize;
+            $wmaIndex = $i - $windowSize;
+            
+            $details[] = [
+                'bulan' => $bulan,
+                'aktual' => $data[$i],
+                'sma' => isset($sma['predictions'][$smaIndex]) ? round($sma['predictions'][$smaIndex], 2) : '-',
+                'wma' => isset($wma['predictions'][$wmaIndex]) ? round($wma['predictions'][$wmaIndex], 2) : '-',
+                'error_sma' => isset($sma['errors'][$smaIndex]) ? round($sma['errors'][$smaIndex], 2) : '-',
+                'error_wma' => isset($wma['errors'][$wmaIndex]) ? round($wma['errors'][$wmaIndex], 2) : '-',
+            ];
+        }
+        
+        return $details;
+    }
+
+    private function prepareMethodComparison($sma, $wma)
+    {
+        return [
+            'SMA' => [
+                'window_size' => $sma['window_size'],
+                'mape' => number_format($sma['mape'], 2) . '%',
+                'mse' => number_format($sma['mse'], 2),
+                'mae' => number_format($sma['mae'], 2),
+                'rumus' => 'SMA = (D₁ + D₂ + ... + Dₙ) / n'
+            ],
+            'WMA' => [
+                'window_size' => $wma['window_size'],
+                'weights' => implode(', ', $wma['weights']),
+                'mape' => number_format($wma['mape'], 2) . '%',
+                'mse' => number_format($wma['mse'], 2),
+                'mae' => number_format($wma['mae'], 2),
+                'rumus' => 'WMA = (1×D₁ + 2×D₂ + ... + n×Dₙ) / (1+2+...+n)'
+            ]
+        ];
+    }
+
 
 }

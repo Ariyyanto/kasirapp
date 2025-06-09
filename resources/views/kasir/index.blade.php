@@ -154,10 +154,7 @@
                             </button>
                             <button class="btn btn-secondary" id="switch-camera">
                                 <i class="fas fa-camera"></i> Ganti Kamera
-                            </button>
-                            <button class="btn btn-info" id="enhance-quality">
-                                <i class="fas fa-sun"></i> Perbaiki Kualitas
-                            </button>
+                            </button>                            
                             <button class="btn btn-warning" id="zoom-in">
                                 <i class="fas fa-search-plus"></i> Zoom
                             </button>
